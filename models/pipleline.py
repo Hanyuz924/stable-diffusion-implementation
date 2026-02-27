@@ -1,3 +1,8 @@
+
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 from diffusers import DDIMScheduler
 from diffusers import AutoencoderKL
@@ -22,7 +27,12 @@ def load_model(load_nuet = True, load_decoder = True, load_encoder =True, load_t
         pn.load_diffusion(my_unet, state_dict)
     else:
         my_unet = None
-    
+
+    if load_decoder or load_encoder : 
+        official_vae = AutoencoderKL.from_pretrained(
+                "../sd15_local", 
+                subfolder="vae"
+            )
     if load_decoder:
         vae_path = "../sd15_local/vae/diffusion_pytorch_model.safetensors"
         vae_config_path = "../sd15_local/vae/config.json"
@@ -36,10 +46,7 @@ def load_model(load_nuet = True, load_decoder = True, load_encoder =True, load_t
         pn.load_decoder(decoder, state_dict)
 
         decoder_post_quant = torch.nn.Conv2d(4 ,4 , kernel_size=1)
-        official_vae = AutoencoderKL.from_pretrained(
-                "../sd15_local", 
-                subfolder="vae"
-            )
+
         post_quant_weights = official_vae.post_quant_conv.state_dict()
         pn.load_post_quant_conv(decoder_post_quant, post_quant_weights)
     else:
@@ -58,6 +65,10 @@ def load_model(load_nuet = True, load_decoder = True, load_encoder =True, load_t
                           layer_per_block= vae_config["layers_per_block"]
                         )
         pn.load_encoder(encoder, state_dict)
+
+        encoder_post_quant_conv = torch.nn.Conv2d(8, 8, kernel_size = 1)
+        pre_quant_conv_weights = official_vae.quant_conv.state_dict()
+        pn.load_pre_quant_conv(encoder_post_quant_conv, pre_quant_conv_weights)
     else:
         encoder = None
     
@@ -80,7 +91,8 @@ def load_model(load_nuet = True, load_decoder = True, load_encoder =True, load_t
             "post_quant_conv": decoder_post_quant,
             "tokenizer": tokenizer,
             "text_encoder": text_encoder,
-            "encoder":encoder
+            "encoder":encoder,
+            "encoder_post_quant_conv":encoder_post_quant_conv
         }
 
 def DDIM():
@@ -91,10 +103,15 @@ def sample(text_prompt:str, guidance_scale:float, inference_step:int, sample_num
     pass
 
 
-
-
-
 def main():
+    device = "cuda"
+    models = load_model(load_nuet = True, load_decoder = True, load_encoder =False, load_tokenizer = True)
+    my_unet = models["Unet"].to(device)
+    decoder = models["Decoder"].to(device)
+    post_quant_conv = models["post_quant_conv"].to(device)
+    tokenizer = models["tokenizer"]
+    text_encoder = models["text_encoder"].to(device)
+    
     scheduler = DDIMScheduler.from_pretrained(
         "../sd15_local", 
         subfolder="scheduler",
@@ -105,17 +122,10 @@ def main():
     latents = torch.randn((1, 4, 64, 64), device=device)
     latents = latents * scheduler.init_noise_sigma
     prompt = "a photo of cute dog"
-    text_input = tokenizer(
-        prompt,
-        padding="max_length",
-        max_length=tokenizer.model_max_length,
-        truncation=True,
-        return_tensors="pt"
-    )
 
     guidance_scale = 7.0
     with torch.no_grad():
-        text_input = tokenizer(prompt, padding="max_length", max_length=77, truncation=True, return_tensors="pt")
+        text_input = tokenizer(prompt, padding="max_length", max_length=77, truncation=True, return_tensors="pt",device = device)
         cond_embeddings = text_encoder(text_input.input_ids.to(device))[0]
         uncond_input = tokenizer("", padding="max_length", max_length=77, truncation=True, return_tensors="pt")
         uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]
@@ -136,7 +146,7 @@ def main():
             latents = scheduler.step(noise_pred, timestep_val, latents).prev_sample
 
     with torch.no_grad():
-        off_z = decoder_post_quant(latents / 0.18215)
+        off_z = post_quant_conv(latents / 0.18215)
         image_tensor = decoder(off_z)
 
     image_tensor = image_tensor.clamp(-1, 1)
@@ -144,3 +154,6 @@ def main():
     image_numpy = image_tensor.cpu().permute(0, 2, 3, 1).numpy()[0]
     image_pil = Image.fromarray((image_numpy * 255).round().astype(np.uint8))
     image_pil.save("final_cat.png")
+    
+if __name__ == "__main__":
+    main()

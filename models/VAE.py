@@ -241,6 +241,8 @@ class Encoder(nn.Module):
         x = self.conv_act(x)
         x = self.conv_out(x) #[B, C * 2, H, W]
 
+        return x
+    def sample(self, x, noise = None):
         mean, log_variance = torch.chunk(x, 2, dim=1)
         if not noise:
             noise = torch.randn_like(mean)
@@ -248,8 +250,8 @@ class Encoder(nn.Module):
         std = torch.exp(0.5 * log_variance)
         x = mean + std * noise
         x = x * 0.18215
-
-        return x
+        return x 
+        
 
 class Decoder(nn.Module):
     def __init__(self, in_channels:int, out_channels:int, down_block_channels:tuple[int, ...] = (512,), layer_per_block:int = 2, dropout:float = 0.0):

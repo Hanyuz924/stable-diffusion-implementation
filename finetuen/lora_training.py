@@ -75,10 +75,11 @@ def inject_lora(models:torch.nn.Module, target_modules=["to_k", "to_q", "to_v", 
   
 def main():
     #hyper params
-    bs = 4
+    bs = 2
     lr = 1e-5
-    data_loader_workers = 4
-    train_epoch = 20
+    data_loader_workers = 8
+    train_epoch = 1
+    device = "cuda"
     #get models and weights 
     dataset = datasets.load_dataset("Dhiraj45/Anime-Caption")
     models = pipleline.load_model(load_nuet=True,
@@ -86,16 +87,20 @@ def main():
                                   load_encoder=True,
                                   load_tokenizer=True)
     tokenizer = models["tokenizer"]
-    text_encoder = models["text_encoder"]
-    encoder = models["encoder"]
+    text_encoder = models["text_encoder"].to(device)
+    text_encoder.requires_grad_(False)
+    encoder = models["encoder"].to(device)
+    encoder.requires_grad_(False)
+    encoder_post_quant_conv = models["encoder_post_quant_conv"].to(device)
     scheduler = DDIMScheduler.from_pretrained(
         "../sd15_local", 
         subfolder="scheduler",
         local_files_only=True
     )
 
-    unet = models["Unet"]
+    unet = models["Unet"].to(device)
     unet = inject_lora(unet)
+    unet.to(device)
 
 
     for name, parameters in unet.named_parameters():
@@ -141,6 +146,8 @@ def main():
         }
     )
 
+    accumulation_steps = 4
+    scaler = torch.amp.GradScaler("cuda")
     print("***** Running training *****")
     print(f"  Num examples = {len(processed_data)}")
     print(f"  Num Epochs = {train_epoch}")
@@ -152,38 +159,49 @@ def main():
         unet.train()
         epoch_loss = 0.0
         for step, batch in enumerate(train_dataloader):
-            pxiel_value = batch["image"].to(device， dtype=torch.float32)
-            caption_encode = batch["input_ids"].to(deivce)
-            latent = encoder(pxiel_value) 
+            pixel_values = batch["image"].to(device, dtype=torch.float32)
+            input_ids = batch["input_ids"].to(device)
+            with torch.no_grad():
+                latent = encoder(pixel_values)
+                latent = encoder_post_quant_conv(latent)
+                latent = encoder.sample(latent)
+                text_hiddent = text_encoder(input_ids, return_dict=False, device=latent.device)[0]
             bs = latent.shape[0]
+            assert latent.shape[1] == 4, f"latent size after encoder is not correct {latent.shape[1]}"
             time_step = torch.randint(0, scheduler.num_train_timesteps, size=(bs, ), device=latent.device).long()
             noise = torch.randn_like(latent)
             noisy_latents = scheduler.add_noise(latent, noise, time_step) # type: ignore
-            text_hiddent = text_encoder(caption_encode, return_dict=False, device=latent.device)[0]
-            model_pre = unet(noisy_latents, text_hiddent, time_step)
-            loss = torch.nn.functional.mse_loss(model_pre.float(), noise.float(), reduction="mean")
+            with torch.autocast("cuda", dtype=torch.float16):
+                model_pre = unet(noisy_latents, text_hiddent, time_step)
+                loss = torch.nn.functional.mse_loss(model_pre.float(), noise.float(), reduction="mean")
+            loss = loss / accumulation_steps
+            scaler.scale(loss).backward()
+        
+            if (step + 1) % accumulation_steps == 0 or (step + 1) == len(train_dataloader):
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True) 
+                lr_scheduler.step()
+                wandb.log({
+                    "LR":  lr_scheduler.get_last_lr()[0],
+                    "global_step": global_step
+                })
+                wandb.log({
+                    "train/step_loss": loss.item(),
+                    "global_step": global_step
+                })
             progress_bar.set_postfix({"loss": f"{loss.item():.4f}", "lr": lr_scheduler.get_last_lr()[0]})
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            lr_scheduler.step()
-
-            epoch_loss += loss.item()
-            wandb.log({
-                "train/step_loss": loss.item(),
-                "global_step": global_step
-            })
-            wandb.log({
-                "LR":  lr_scheduler.get_last_lr()[0],
-                "global_step": global_step
-            })
+            progress_bar.update(1)
+            loss_item = loss.item() * accumulation_steps 
+            epoch_loss += loss_item
             global_step += 1
         avg_epoch_loss = epoch_loss / len(train_dataloader)
         wandb.log({
             "train/epoch_avg_loss": avg_epoch_loss,
             "epoch": epoch
         })
+    save_weights(unet)
+    wandb.finish()
     
 if __name__ == "__main__":
     main()

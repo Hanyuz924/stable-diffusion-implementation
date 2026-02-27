@@ -85,6 +85,8 @@ def load_encoder(encoder_model, official_state_dict):
 def load_post_quant_conv(post_quant_conv, offical_state_dict):
     post_quant_conv.load_state_dict(offical_state_dict)
 
+def load_pre_quant_conv(pre_quant_conv, official_state_dict):
+    pre_quant_conv.load_state_dict(official_state_dict)
 
 
 

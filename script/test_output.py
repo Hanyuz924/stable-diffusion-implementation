@@ -1,3 +1,8 @@
+import sys
+import os
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import json
 import torch
 from diffusers import AutoencoderKL
@@ -11,6 +16,7 @@ import models.param_namecheck as pn
 
 device = "cuda"
 def test_vae_error():
+    torch.manual_seed(0)
     official_vae = AutoencoderKL.from_pretrained(
         "../sd15_local", 
         subfolder="vae"
@@ -29,11 +35,17 @@ def test_vae_error():
     pn.load_encoder(encoder, state_dict)
 
     encoder.eval()
-
+    encoder_post_quant_conv = torch.nn.Conv2d(8, 8, kernel_size = 1).to(device)
+    pre_quant_conv_weights = official_vae.quant_conv.state_dict()
+    pn.load_pre_quant_conv(encoder_post_quant_conv, pre_quant_conv_weights)
+    
     dummy_image = torch.randn(1, 3, 512, 512, device=official_vae.device)
     with torch.no_grad():
-        official_enc_out = official_vae.encoder(dummy_image)
+        official_enc_out = official_vae.encode(dummy_image).latent_dist.sample() * 0.18215 
+        
         my_enc_out = encoder(dummy_image)
+        my_enc_out = encoder_post_quant_conv(my_enc_out)
+        my_enc_out = encoder.sample(my_enc_out)
 
     mse_diff = F.mse_loss(official_enc_out, my_enc_out).item()
 
@@ -89,6 +101,10 @@ def test_diffusion():
     print(f"My U-Net shape:         {list(my_output.shape)}")
     print(f"U-Net Max Diff:         {unet_max_diff:.10f}")
     print(f"U-Net (MSE):            {unet_mse_diff:.10f}")
+
+
+
+test_vae_error()
 
 
 

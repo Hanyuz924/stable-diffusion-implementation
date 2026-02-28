@@ -111,6 +111,7 @@ def main():
     TRAIN_W, TRAIN_H = 768, 448
     train_transforms = transforms.Compose([
         transforms.Resize((TRAIN_H, TRAIN_W), transforms.InterpolationMode.LANCZOS),
+        transforms.CenterCrop((TRAIN_H, TRAIN_W)),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         transforms.Normalize([0.5], [0.5]),
@@ -146,7 +147,7 @@ def main():
         }
     )
 
-    accumulation_steps = 4
+    accumulation_steps = 16
     scaler = torch.amp.GradScaler("cuda")
     print("***** Running training *****")
     print(f"  Num examples = {len(processed_data)}")
@@ -190,11 +191,11 @@ def main():
                     "train/step_loss": loss.item(),
                     "global_step": global_step
                 })
-            progress_bar.set_postfix({"loss": f"{loss.item():.4f}", "lr": lr_scheduler.get_last_lr()[0]})
-            progress_bar.update(1)
             loss_item = loss.item() * accumulation_steps 
             epoch_loss += loss_item
             global_step += 1
+            progress_bar.set_postfix({"loss": f"{loss_item:.4f}", "lr": lr_scheduler.get_last_lr()[0]})
+            progress_bar.update(1)
         avg_epoch_loss = epoch_loss / len(train_dataloader)
         wandb.log({
             "train/epoch_avg_loss": avg_epoch_loss,

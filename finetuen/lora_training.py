@@ -34,6 +34,18 @@ def check_dataset(data):
     print(data["train"].column_names)
     print(data["train"]["Image"][0:2])
 
+def save_lora_weights_only(models, step: int = 0):
+    models_dict = models.state_dict()
+    new_dict = {}
+    for name, value in models_dict.items():
+        if "base_layer" in name:
+            new_dict[name] = value
+    if step != 0 :
+        file_name = f"lora_merged_weights_{step}.safetensors"
+    else:
+        file_name = "lora_merged_weights.safetensors"
+    save_file(new_dict, file_name)
+
 def save_weights(models):
     models_dict = models.state_dict()
     save_file(models_dict, "lora.safetensors")
@@ -71,14 +83,19 @@ def inject_lora(models:torch.nn.Module, target_modules=["to_k", "to_q", "to_v", 
                                     )
         setattr(parent_module, child_name, lora_layer)
     return models
+
+def merge_lora(model:torch.nn.Module):
+    for name, module in model.named_modules():
+        if isinstance(module, lora.LoraLayer):
+            print("merge lora layer...", name)
+            module.merge()
     
-  
 def main():
     #hyper params
-    bs = 2
-    lr = 1e-5
+    bs = 1
+    lr = 1e-4
     data_loader_workers = 8
-    train_epoch = 1
+    train_epoch = 15
     device = "cuda"
     #get models and weights 
     dataset = datasets.load_dataset("Dhiraj45/Anime-Caption")
@@ -108,7 +125,7 @@ def main():
             parameters.requires_grad = True
         else:
             parameters.requires_grad = False
-    TRAIN_W, TRAIN_H = 768, 448
+    TRAIN_W, TRAIN_H = 512, 512
     train_transforms = transforms.Compose([
         transforms.Resize((TRAIN_H, TRAIN_W), transforms.InterpolationMode.LANCZOS),
         transforms.CenterCrop((TRAIN_H, TRAIN_W)),
@@ -127,7 +144,7 @@ def main():
         num_workers=data_loader_workers
     )
     # prepare optimizer and lr_scheduler
-    optimizer = torch.optim.AdamW(unet.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(unet.parameters(), lr=lr,)
 
     scheduler_traning_step = train_epoch * len(train_dataloader)
     scheduler_warm_up_step = min(int(scheduler_traning_step * 0.1), 500)
@@ -147,15 +164,17 @@ def main():
         }
     )
 
-    accumulation_steps = 16
+    accumulation_steps = 8
     scaler = torch.amp.GradScaler("cuda")
+    global_step = 0
+    total_steps = int(train_epoch * len(train_dataloader) // accumulation_steps)
+    progress_bar = tqdm(total=total_steps, desc="Training Steps")
     print("***** Running training *****")
-    print(f"  Num examples = {len(processed_data)}")
+    print(f"  Num examples = {len(processed_data['image'])}")
     print(f"  Num Epochs = {train_epoch}")
     print(f"  batch size = {bs}")
-    global_step = 0
-    total_steps = train_epoch * len(train_dataloader)
-    progress_bar = tqdm(total=total_steps, desc="Training Steps")
+    print(f"  grad accumulation steps = {accumulation_steps}")
+    print(f"  total_steps = {total_steps}")
     for epoch in range(train_epoch):
         unet.train()
         epoch_loss = 0.0
@@ -166,9 +185,8 @@ def main():
                 latent = encoder(pixel_values)
                 latent = encoder_post_quant_conv(latent)
                 latent = encoder.sample(latent)
-                text_hiddent = text_encoder(input_ids, return_dict=False, device=latent.device)[0]
+                text_hiddent = text_encoder(input_ids, return_dict=False)[0]
             bs = latent.shape[0]
-            assert latent.shape[1] == 4, f"latent size after encoder is not correct {latent.shape[1]}"
             time_step = torch.randint(0, scheduler.num_train_timesteps, size=(bs, ), device=latent.device).long()
             noise = torch.randn_like(latent)
             noisy_latents = scheduler.add_noise(latent, noise, time_step) # type: ignore
@@ -177,7 +195,6 @@ def main():
                 loss = torch.nn.functional.mse_loss(model_pre.float(), noise.float(), reduction="mean")
             loss = loss / accumulation_steps
             scaler.scale(loss).backward()
-        
             if (step + 1) % accumulation_steps == 0 or (step + 1) == len(train_dataloader):
                 scaler.step(optimizer)
                 scaler.update()
@@ -191,16 +208,22 @@ def main():
                     "train/step_loss": loss.item(),
                     "global_step": global_step
                 })
+                progress_bar.update(1)
             loss_item = loss.item() * accumulation_steps 
             epoch_loss += loss_item
             global_step += 1
             progress_bar.set_postfix({"loss": f"{loss_item:.4f}", "lr": lr_scheduler.get_last_lr()[0]})
-            progress_bar.update(1)
+        save_lora_weights_only(unet, step = 1)
+        return
+        if epoch != 0 and epoch % 5 == 0:
+            save_lora_weights_only(unet, step = epoch)
         avg_epoch_loss = epoch_loss / len(train_dataloader)
         wandb.log({
             "train/epoch_avg_loss": avg_epoch_loss,
             "epoch": epoch
         })
+    #merge lora weights to base layer 
+    merge_lora(unet)
     save_weights(unet)
     wandb.finish()
     

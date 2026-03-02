@@ -1,7 +1,6 @@
 
 import sys
 import os
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 from diffusers import DDIMScheduler
@@ -23,7 +22,7 @@ from diffusers import UNet2DConditionModel
 
 
 def merge_base_layer_to_model(model: torch.nn.Module):
-    base_layer_path = "../finetuen/lora_merged_weights_15.safetensors"
+    base_layer_path = "../finetuen/lora_merged_weights_450.safetensors"
     lora_weights = load_file(base_layer_path)
     with torch.no_grad():
         for name, value in lora_weights.items():
@@ -38,9 +37,6 @@ def merge_base_layer_to_model(model: torch.nn.Module):
             except AttributeError:
                 print(f"警告：在模型中找不到参数 {orig_name}，已跳过。")
     return
-
-
-
 
 def merge_lora_to_base(unet_model, lora_weights_path : str = ""):
     lora_path = lora_weights_path
@@ -149,7 +145,7 @@ def main():
     device = "cuda"
     models = load_model(load_nuet = True, load_decoder = True, load_encoder =False, load_tokenizer = True)
     my_unet = models["Unet"]
-    merge_base_layer_to_model(my_unet)
+    #merge_base_layer_to_model(my_unet)
     #merge_lora_to_base(my_unet, "../finetuen/lora2.safetensors")
     my_unet.to(device)
     decoder = models["Decoder"].to(device)
@@ -163,42 +159,46 @@ def main():
         local_files_only=True
     )
     num_inference_steps = 50
+
     scheduler.set_timesteps(num_inference_steps)
     latents = torch.randn((1, 4, 64, 64), device=device)
     latents = latents * scheduler.init_noise_sigma
-    prompt = "A picture of a woman, with her hair in a high bun and pink lips."
+    prompt = "naruto style, a pink eye with black circles around it "
 
-    guidance_scale = 7.0
-    with torch.no_grad():
-        text_input = tokenizer(prompt, padding="max_length", max_length=77, truncation=True, return_tensors="pt",device = device)
-        cond_embeddings = text_encoder(text_input.input_ids.to(device))[0]
-        uncond_input = tokenizer("", padding="max_length", max_length=77, truncation=True, return_tensors="pt")
-        uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]
-        text_embeddings = torch.cat([uncond_embeddings, cond_embeddings])
+    guidance_scale = 7.5
+    for i in range(0,2):
+        latents = torch.randn((1, 4, 64, 64), device=device)
+        latents = latents * scheduler.init_noise_sigma
+        with torch.no_grad():
+            text_input = tokenizer(prompt, padding="max_length", max_length=77, truncation=True, return_tensors="pt",device = device)
+            cond_embeddings = text_encoder(text_input.input_ids.to(device))[0]
+            uncond_input = tokenizer("", padding="max_length", max_length=77, truncation=True, return_tensors="pt")
+            uncond_embeddings = text_encoder(uncond_input.input_ids.to(device))[0]
+            text_embeddings = torch.cat([uncond_embeddings, cond_embeddings])
 
-        for t in tqdm(scheduler.timesteps):
-            timestep_val = t.item() if isinstance(t, torch.Tensor) else t
-            latent_model_input = torch.cat([latents] * 2)
-            latent_model_input = scheduler.scale_model_input(latent_model_input, timestep_val)
-            t_tensor = torch.tensor([timestep_val], dtype=torch.float32, device=device)
-            noise_pred = my_unet(
-                latent_imgae=latent_model_input, 
-                hidden_contex=text_embeddings, 
-                time_step=t_tensor                     
-            )
-            noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-            noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-            latents = scheduler.step(noise_pred, timestep_val, latents).prev_sample
+            for t in tqdm(scheduler.timesteps):
+                timestep_val = t.item() if isinstance(t, torch.Tensor) else t
+                latent_model_input = torch.cat([latents] * 2)
+                latent_model_input = scheduler.scale_model_input(latent_model_input, timestep_val)
+                t_tensor = torch.tensor([timestep_val], dtype=torch.float32, device=device)
+                noise_pred = my_unet(
+                    latent_imgae=latent_model_input, 
+                    hidden_contex=text_embeddings, 
+                    time_step=t_tensor                     
+                )
+                noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+                latents = scheduler.step(noise_pred, timestep_val, latents).prev_sample
 
-    with torch.no_grad():
-        off_z = post_quant_conv(latents / 0.18215)
-        image_tensor = decoder(off_z)
+        with torch.no_grad():
+            off_z = post_quant_conv(latents / 0.18215)
+            image_tensor = decoder(off_z)
 
-    image_tensor = image_tensor.clamp(-1, 1)
-    image_tensor = (image_tensor / 2 + 0.5).clamp(0, 1)
-    image_numpy = image_tensor.cpu().permute(0, 2, 3, 1).numpy()[0]
-    image_pil = Image.fromarray((image_numpy * 255).round().astype(np.uint8))
-    image_pil.save("test1.png")
+        image_tensor = image_tensor.clamp(-1, 1)
+        image_tensor = (image_tensor / 2 + 0.5).clamp(0, 1)
+        image_numpy = image_tensor.cpu().permute(0, 2, 3, 1).numpy()[0]
+        image_pil = Image.fromarray((image_numpy * 255).round().astype(np.uint8))
+        image_pil.save(f"test_{i}_of_2_or_eye_or.png")
     
 if __name__ == "__main__":
     main()

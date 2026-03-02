@@ -3,7 +3,7 @@ import os
 from tqdm import tqdm 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-import datasets
+import torchvision
 import models.pipleline as pipleline
 from torchvision import transforms
 import torch
@@ -13,7 +13,9 @@ import finetuen.lora as lora
 from diffusers import DDIMScheduler
 import wandb
 from torch.utils.data import Dataset, DataLoader
-
+import json
+from datasets import Image as DatasetsImage
+import load_data as data
 
 
 class DictDataset(Dataset):
@@ -34,11 +36,6 @@ def check_lora_weights():
     state_dict = load_file("lora_merged_weights_20.safetensors")
     for name, value in state_dict.items():
         print(name, value.shape)
-
-def check_dataset(data):
-    print(type(data))
-    print(data["train"].column_names)
-    print(data["train"]["Image"][0:2])
 
 def save_lora_weights_only(models, step: int = 0):
     for name, module in models.named_modules():
@@ -104,21 +101,14 @@ def merge_lora(model:torch.nn.Module):
     
 def main():
     #hyper params
-    bs = 1
+    bs = 2
     lr = 1e-4
     data_loader_workers = 8
     train_epoch = 15
     device = "cuda"
     #get models and weights 
-
-    dataset = datasets.load_dataset("Dhiraj45/Anime-Caption")
-    for index, token in enumerate(dataset["train"]["Caption"]):
-        if index < 10:
-            print("------")
-            print(token)
-        else:
-            break
-    return
+    data_set_path = "../zx10_processed"
+    
     models = pipleline.load_model(load_nuet=True,
                                   load_decoder=False,
                                   load_encoder=True,
@@ -134,6 +124,18 @@ def main():
         subfolder="scheduler",
         local_files_only=True
     )
+    train_dataset = data.CustomMotorcycleDataset(folder_path= data_set_path, tokenizer=tokenizer)
+    # for index, sample in enumerate(train_dataset):
+    #     pixel_values = sample["pixel_values"] 
+    #     input_ids = sample["input_ids"]
+    #     torchvision.utils.save_image(
+    #         pixel_values, 
+    #         f"debug_batch_{index}.png", 
+    #         normalize=True, 
+    #         value_range=(-1, 1)
+    #     )
+    #     print("prompt", tokenizer.decode(input_ids, skip_special_tokens=True))
+    # return
 
     unet = models["Unet"].to(device)
     unet = inject_lora(unet)
@@ -145,16 +147,16 @@ def main():
             parameters.requires_grad = True
         else:
             parameters.requires_grad = False
-    TRAIN_W, TRAIN_H = 512, 512
-    train_transforms = transforms.Compose([
-        transforms.Resize((TRAIN_H, TRAIN_W), transforms.InterpolationMode.LANCZOS),
-        transforms.CenterCrop((TRAIN_H, TRAIN_W)),
-        transforms.RandomHorizontalFlip(),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5], [0.5]),
-    ])
-    processed_data = preprocess_data(train_transforms, tokenizer, dataset)
-    train_dataset = DictDataset(processed_data)
+    # TRAIN_W, TRAIN_H = 512, 512
+    # train_transforms = transforms.Compose([
+    #     transforms.Resize((TRAIN_H, TRAIN_W), transforms.InterpolationMode.LANCZOS),
+    #     transforms.CenterCrop((TRAIN_H, TRAIN_W)),
+    #     transforms.RandomHorizontalFlip(),
+    #     transforms.ToTensor(),
+    #     transforms.Normalize([0.5], [0.5]),
+    # ])
+    # processed_data = preprocess_data(train_transforms, tokenizer, dataset)
+    # train_dataset = DictDataset(processed_data)
 
     #dataloader:
     train_dataloader = torch.utils.data.DataLoader(
@@ -184,7 +186,7 @@ def main():
         }
     )
 
-    accumulation_steps = 8
+    accumulation_steps = 4
     scaler = torch.amp.GradScaler("cuda")
     global_step = 0
     total_steps = int(train_epoch * len(train_dataloader) // accumulation_steps)
@@ -233,8 +235,6 @@ def main():
             epoch_loss += loss_item
             global_step += 1
             progress_bar.set_postfix({"loss": f"{loss_item:.4f}", "lr": lr_scheduler.get_last_lr()[0]})
-        save_lora_weights_only(unet, step = 1)
-        return
         if epoch != 0 and epoch % 5 == 0:
             save_lora_weights_only(unet, step = epoch)
         avg_epoch_loss = epoch_loss / len(train_dataloader)

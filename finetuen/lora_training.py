@@ -7,7 +7,7 @@ import datasets
 import models.pipleline as pipleline
 from torchvision import transforms
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import save_file,load_file
 from diffusers.optimization import get_scheduler
 import finetuen.lora as lora
 from diffusers import DDIMScheduler
@@ -29,12 +29,21 @@ class DictDataset(Dataset):
             "input_ids": self.data_dict["input_ids"][idx]
         }
 
+def check_lora_weights():
+
+    state_dict = load_file("lora_merged_weights_20.safetensors")
+    for name, value in state_dict.items():
+        print(name, value.shape)
+
 def check_dataset(data):
     print(type(data))
     print(data["train"].column_names)
     print(data["train"]["Image"][0:2])
 
 def save_lora_weights_only(models, step: int = 0):
+    for name, module in models.named_modules():
+        if isinstance(module, lora.LoraLayer):
+            module.merge() 
     models_dict = models.state_dict()
     new_dict = {}
     for name, value in models_dict.items():
@@ -45,6 +54,9 @@ def save_lora_weights_only(models, step: int = 0):
     else:
         file_name = "lora_merged_weights.safetensors"
     save_file(new_dict, file_name)
+    for name, module in models.named_modules():
+        if isinstance(module, lora.LoraLayer):
+            module.unmerge() 
 
 def save_weights(models):
     models_dict = models.state_dict()
@@ -98,7 +110,15 @@ def main():
     train_epoch = 15
     device = "cuda"
     #get models and weights 
+
     dataset = datasets.load_dataset("Dhiraj45/Anime-Caption")
+    for index, token in enumerate(dataset["train"]["Caption"]):
+        if index < 10:
+            print("------")
+            print(token)
+        else:
+            break
+    return
     models = pipleline.load_model(load_nuet=True,
                                   load_decoder=False,
                                   load_encoder=True,

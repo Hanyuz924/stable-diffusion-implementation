@@ -21,6 +21,27 @@ import json
 from safetensors.torch import load_file, save_file
 from diffusers import UNet2DConditionModel
 
+
+def merge_base_layer_to_model(model: torch.nn.Module):
+    base_layer_path = "../finetuen/lora_merged_weights_15.safetensors"
+    lora_weights = load_file(base_layer_path)
+    with torch.no_grad():
+        for name, value in lora_weights.items():
+            orig_name = name.replace("base_layer.", "")
+            try:
+                model_param = model.get_parameter(orig_name)
+                if model_param.shape != value.shape:
+                    print(f"形状不匹配! {orig_name}: 模型 {model_param.shape}, 权重 {value.shape}")
+                    break
+                model_param.copy_(value)
+                print(f"merge {name}")
+            except AttributeError:
+                print(f"警告：在模型中找不到参数 {orig_name}，已跳过。")
+    return
+
+
+
+
 def merge_lora_to_base(unet_model, lora_weights_path : str = ""):
     lora_path = lora_weights_path
     lora_state_dict = load_file(lora_path)
@@ -128,8 +149,9 @@ def main():
     device = "cuda"
     models = load_model(load_nuet = True, load_decoder = True, load_encoder =False, load_tokenizer = True)
     my_unet = models["Unet"]
-    merge_lora_to_base(my_unet, "../finetuen/lora2.safetensors")
-    return 
+    merge_base_layer_to_model(my_unet)
+    #merge_lora_to_base(my_unet, "../finetuen/lora2.safetensors")
+    my_unet.to(device)
     decoder = models["Decoder"].to(device)
     post_quant_conv = models["post_quant_conv"].to(device)
     tokenizer = models["tokenizer"]
@@ -144,7 +166,7 @@ def main():
     scheduler.set_timesteps(num_inference_steps)
     latents = torch.randn((1, 4, 64, 64), device=device)
     latents = latents * scheduler.init_noise_sigma
-    prompt = "A sketch of a pencil and a notebook."
+    prompt = "A picture of a woman, with her hair in a high bun and pink lips."
 
     guidance_scale = 7.0
     with torch.no_grad():
@@ -176,7 +198,7 @@ def main():
     image_tensor = (image_tensor / 2 + 0.5).clamp(0, 1)
     image_numpy = image_tensor.cpu().permute(0, 2, 3, 1).numpy()[0]
     image_pil = Image.fromarray((image_numpy * 255).round().astype(np.uint8))
-    image_pil.save("final_cat.png")
+    image_pil.save("test1.png")
     
 if __name__ == "__main__":
     main()
